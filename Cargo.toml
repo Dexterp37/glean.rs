@@ -5,6 +5,7 @@ members = [
   "glean-core/ffi",
   "glean-core/preview",
   "glean-core/benchmark",
+  "glean-core/rlb",
 ]
 
 [profile.release]
