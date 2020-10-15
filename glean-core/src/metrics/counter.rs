@@ -19,7 +19,7 @@ pub struct CounterMetric {
 }
 
 /// Describes operations for the `CounterMetric`.
-pub trait CounterMetricTrait {
+pub trait Counter {
     /// Creates a new counter metric.
     fn new(meta: CommonMetricData) -> Self;
 

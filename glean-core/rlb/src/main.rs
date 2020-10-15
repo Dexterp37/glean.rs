@@ -4,8 +4,7 @@ pub extern crate once_cell;
 // That way a user only needs to depend on this crate, not on glean_core (and there can't be a
 // version mismatch).
 pub use glean_core::{
-    metrics::CounterMetricTrait, metrics::CounterMetric, CommonMetricData, ErrorType,
-    Lifetime,
+    metrics::Counter, CommonMetricData, ErrorType, Lifetime,
 };
 
 /// Run a closure with a mutable reference to the locked global Glean object.
@@ -20,14 +19,14 @@ where
     f(&mut lock)
 }
 
-// This is required. If we try to implement CounterMetricTrait for
+// This is required. If we try to implement Counter for
 // glean_core::metrics::CounterMetric then we hit
 // error[E0117]: only traits defined in the current crate can be implemented for arbitrary types
-pub struct CounterMetricType(pub(crate) CounterMetric);
+pub struct CounterMetric(pub(crate) glean_core::metrics::CounterMetric);
 
 // Internally we implement this ourselves, because we need to delegate around and fetch the
 // Glean object, etc.
-impl CounterMetricTrait for CounterMetricType {
+impl Counter for CounterMetric {
     fn new(meta: CommonMetricData) -> Self {
         Self(glean_core::metrics::CounterMetric::new(meta))
     }
@@ -51,7 +50,7 @@ impl CounterMetricTrait for CounterMetricType {
 
 mod fog {
     use super::{
-		CommonMetricData, CounterMetricTrait, CounterMetricType, Lifetime
+		CommonMetricData, Counter, CounterMetric, Lifetime
 	};
     use std::sync::Arc;
     use inherent::inherent;
@@ -65,18 +64,18 @@ mod fog {
     pub struct CounterMetricIpc {}
 
     pub enum ProcessAwareCounterMetric {
-        Parent(Arc<CounterMetricType>),
+        Parent(Arc<CounterMetric>),
         Child(CounterMetricIpc),
     }
 
     #[inherent(pub)]
-    impl CounterMetricTrait for ProcessAwareCounterMetric {
+    impl Counter for ProcessAwareCounterMetric {
 		fn new(meta: CommonMetricData) -> Self {
             if need_ipc() {
                 ProcessAwareCounterMetric::Child(CounterMetricIpc{ /* placeholder */})
             } else {
                 ProcessAwareCounterMetric::Parent(Arc::new(
-                    CounterMetricType::new(meta)
+                    CounterMetric::new(meta)
                 ))
             }
 		}
@@ -88,7 +87,7 @@ mod fog {
                     let metric = Arc::clone(&p);
                     // Important: the dispatcher is handled by the RLB trait
                     // implementation.
-                    CounterMetricTrait::add(&*metric, amount);
+                    Counter::add(&*metric, amount);
                 }
                 ProcessAwareCounterMetric::Child(_) => {
                     println!("ProcessAwareCounterMetric.add({:?}) - child", amount);
