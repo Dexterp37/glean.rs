@@ -18,6 +18,31 @@ pub struct CounterMetric {
     meta: CommonMetricData,
 }
 
+/// Describes operations for the `CounterMetric`.
+pub trait CounterMetricTrait {
+    /// Creates a new counter metric.
+    fn new(meta: CommonMetricData) -> Self;
+
+    /// Increases the counter by `amount`.
+    ///
+    /// # Arguments
+    ///
+    /// * `glean` - The Glean instance this metric belongs to.
+    /// * `amount` - The amount to increase by. Should be positive.
+    ///
+    /// ## Notes
+    ///
+    /// Logs an error if the `amount` is 0 or negative.
+    fn add(&self, amount: i32);
+
+    /// **Test-only API.**
+    ///
+    /// Gets the currently stored value as an integer.
+    ///
+    /// This doesn't clear the stored value.
+    fn test_get_value(&self) -> Option<i32>;
+}
+
 impl MetricType for CounterMetric {
     fn meta(&self) -> &CommonMetricData {
         &self.meta

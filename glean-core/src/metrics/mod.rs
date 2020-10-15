@@ -38,6 +38,7 @@ use crate::Glean;
 
 pub use self::boolean::BooleanMetric;
 pub use self::counter::CounterMetric;
+pub use self::counter::CounterMetricTrait;
 pub use self::datetime::DatetimeMetric;
 pub use self::event::EventMetric;
 pub(crate) use self::experiment::ExperimentMetric;
