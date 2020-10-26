@@ -35,7 +35,7 @@ use std::{
     thread::{self, JoinHandle},
 };
 
-use crossbeam_channel::{bounded, unbounded, SendError, Sender, TrySendError};
+use crossbeam_channel::{bounded, unbounded, select, SendError, Sender, TrySendError};
 use thiserror::Error;
 
 pub use global::*;
@@ -93,6 +93,7 @@ impl<T> From<SendError<T>> for DispatchError {
 struct DispatchGuard {
     queue_preinit: Arc<AtomicBool>,
     preinit: Sender<Command>,
+    priority_queue: Sender<Command>,
     queue: Sender<Command>,
 }
 
@@ -100,6 +101,42 @@ impl DispatchGuard {
     pub fn launch(&self, task: impl FnOnce() + Send + 'static) -> Result<(), DispatchError> {
         let task = Command::Task(Box::new(task));
         self.send(task)
+    }
+
+    pub fn launch_now(&self, task: impl FnOnce() + Send + 'static) -> Result<(), DispatchError> {
+        println!("**** DEBUG - launch_now");
+        let task = Command::Task(Box::new(task));
+        self.priority_queue.send(task)?;
+        //self.block_sender.send(())?;
+        Ok(())
+    }
+
+    pub fn flush(&self) -> Result<(), DispatchError> {
+        println!("**** DEBUG - flush");
+        //let task = Command::Task(Box::new(task));
+        //self.priority_queue.send(task)?;
+        //self.block_sender.send(())?;
+        // We immediately stop queueing in the pre-init buffer.
+        let old_val = self.queue_preinit.swap(false, Ordering::SeqCst);
+        if !old_val {
+            return Err(DispatchError::AlreadyFlushed);
+        }
+
+        // Unblock the worker thread exactly once.
+        //self.block_sender.send(())?;
+
+        // Single-use channel to communicate with the worker thread.
+        let (swap_sender, swap_receiver) = bounded(0);
+
+        // Send final command and block until it is sent.
+        self.priority_queue
+            .send(Command::Swap(swap_sender))
+            .map_err(|_| DispatchError::SendError)?;
+
+        // Now wait for the worker thread to do the swap and inform us.
+        // This blocks until all tasks in the preinit buffer have been processed.
+        swap_receiver.recv()?;
+        Ok(())
     }
 
     pub fn shutdown(&self) -> Result<(), DispatchError> {
@@ -134,6 +171,9 @@ pub struct Dispatcher {
     /// Used to unblock the worker thread initially.
     block_sender: Sender<()>,
 
+    /// TODO
+    priority_sender: Sender<Command>,
+
     /// Sender for the preinit queue.
     preinit_sender: Sender<Command>,
 
@@ -153,28 +193,40 @@ impl Dispatcher {
     pub fn new(max_queue_size: usize) -> Self {
         let (block_sender, block_receiver) = bounded(0);
         let (preinit_sender, preinit_receiver) = bounded(max_queue_size);
+        let (priority_sender, priority_receiver) = unbounded();
         let (sender, mut unbounded_receiver) = unbounded();
 
         let queue_preinit = Arc::new(AtomicBool::new(true));
 
         let worker = thread::spawn(move || {
-            if block_receiver.recv().is_err() {
+            println!("**** DEBUG - pre block receiver");
+            /*if block_receiver.recv().is_err() {
                 // The other side was disconnected.
                 // There's nothing the worker thread can do.
                 log::error!("The task producer was disconnected. Worker thread will exit.");
                 return;
-            }
+            }*/
+            println!("**** DEBUG - post block receiver");
 
             let mut receiver = preinit_receiver;
             loop {
                 use Command::*;
 
-                match receiver.recv() {
+                let msg = match priority_receiver.try_recv() {
+                    Ok(m) => Ok(m),
+                    Err(_) => select!{
+                        recv(priority_receiver) -> msg => msg,
+                        recv(receiver) -> msg => msg
+                    }
+                };
+
+                match msg {
                     Ok(Shutdown) => {
                         break;
                     }
 
                     Ok(Task(f)) => {
+                        println!("**** DEBUG - dispatching task");
                         (f)();
                     }
 
@@ -207,6 +259,7 @@ impl Dispatcher {
         Dispatcher {
             queue_preinit,
             block_sender,
+            priority_sender,
             preinit_sender,
             sender,
             worker: Some(worker),
@@ -217,6 +270,7 @@ impl Dispatcher {
         DispatchGuard {
             queue_preinit: Arc::clone(&self.queue_preinit),
             preinit: self.preinit_sender.clone(),
+            priority_queue: self.priority_sender.clone(),
             queue: self.sender.clone(),
         }
     }
@@ -250,6 +304,8 @@ impl Dispatcher {
     ///
     /// Returns an error if called multiple times.
     pub fn flush_init(&mut self) -> Result<(), DispatchError> {
+        println!("**** DEBUG - flush_init");
+
         // We immediately stop queueing in the pre-init buffer.
         let old_val = self.queue_preinit.swap(false, Ordering::SeqCst);
         if !old_val {
@@ -277,8 +333,9 @@ impl Dispatcher {
 #[cfg(test)]
 mod test {
     use super::*;
+    use once_cell::sync::Lazy;
     use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
-    use std::sync::{Arc, Mutex};
+    use std::sync::{Arc, Mutex, RwLock};
     use std::{thread, time::Duration};
 
     fn enable_test_logging() {
@@ -502,5 +559,52 @@ mod test {
 
         let expected = (1..=20).collect::<Vec<_>>();
         assert_eq!(&*result.lock().unwrap(), &expected);
+    }
+
+    #[test]
+    fn can_flush_from_dispatched_task() {
+        enable_test_logging();
+
+        static DISPATCHER: Lazy<RwLock<Option<Dispatcher>>> =
+            Lazy::new(|| RwLock::new(Some(Dispatcher::new(5))));
+
+        let thread_canary = Arc::new(AtomicBool::new(false));
+
+        let canary_clone = thread_canary.clone();
+
+        DISPATCHER
+            .read()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .guard()
+            .launch_now(move || {
+                println!("**** DEBUG - init task");
+
+                canary_clone.store(true, Ordering::SeqCst);
+
+                println!("**** DEBUG - pre flush outer call");
+                DISPATCHER
+                    .write()
+                    .unwrap()
+                    .as_mut()
+                    .map(|dispatcher| {
+                        println!("**** DEBUG pre-flush call");
+                        dispatcher.flush_init()
+                    })
+                    .unwrap()
+                    .expect("The flush task must be correctly dispatched");
+                
+                println!("**** DEBUG - post flush outer call");
+            })
+            .expect("The initial task must be correctly dispatched");
+
+        DISPATCHER
+            .write()
+            .unwrap()
+            .as_mut()
+            .map(|dispatcher| dispatcher.block_on_queue())
+            .unwrap();
+        assert_eq!(true, thread_canary.load(Ordering::SeqCst));
     }
 }
